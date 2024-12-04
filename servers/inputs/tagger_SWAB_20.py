@@ -17,30 +17,30 @@ timeout = 5
 ### END NODE INFO
 """
 
-
 from labrad.server import LabradServer
 from labrad.server import setting
 from twisted.internet.defer import ensureDeferred
-from utils import common
 import TimeTagger
 import numpy as np
 import logging
 import re
 import socket
+import sys
+sys.path.insert(0, 'C:\\Users\\choyl\\ChoyDioptric')  # Add parent directory to path
 from servers.inputs.interfaces.tagger import Tagger
-
+from utils import common
+import matplotlib.pyplot as plt
 
 class TaggerSwab20(Tagger, LabradServer):
     name = "tagger_SWAB_20"
     pc_name = socket.gethostname()
 
     def initServer(self):
-        ### Logging
-
         filename = (
-            "E:/Shared drives/Kolkowitz Lab" " Group/nvdata/pc_{}/labrad_logging/{}.log"
+            "D:/Choy_Lab/"
+            "sivdata/labrad_logging/{}.log"
         )
-        filename = filename.format(self.pc_name, self.name)
+        filename = filename.format(self.name)
         logging.basicConfig(
             level=logging.INFO,
             format="%(asctime)s %(levelname)-8s %(message)s",
@@ -48,16 +48,18 @@ class TaggerSwab20(Tagger, LabradServer):
             filename=filename,
         )
 
-        ### Configure
-
         config = common.get_config_dict()
+        print(config)
         self.config_apd_indices = config["apd_indices"]
-        tagger_serial = config["DeviceIDs"][f"{self.name}_serial"]
+        self.reset_tag_stream_state()
+        tagger_ip = config["DeviceIDs"][f"{self.name}_ip"]
+        tagger_port = config["DeviceIDs"][f"{self.name}_port"]
         try:
-            self.tagger = TimeTagger.createTimeTagger(tagger_serial)
+            self.tagger = TimeTagger.createTimeTaggerNetwork(f'{tagger_ip}:{tagger_port}')
+            # self.tagger = Pyro5.api.Proxy("PYRO:TimeTaggerRestricted@192.168.1.8:41101")
         except Exception as e:
             logging.info(e)
-        self.tagger.reset()
+        self.tagger.clearOverflows() #no tagger.reset() could be used 
 
         # Wiring
         wiring = config["Wiring"]["Tagger"]
@@ -74,27 +76,27 @@ class TaggerSwab20(Tagger, LabradServer):
                 di_apd = wiring[key]
                 self.tagger_di_apd[apd_index] = di_apd
 
-        ### Wrap up
-
+        
         self.reset_tag_stream_state()
         self.reset(None)
         logging.info("init complete")
 
+
     def read_raw_stream(self):
-        if self.stream is None:
-            logging.error("read_raw_stream attempted while stream is None.")
-            return
-        buffer = self.stream.getData()
-        # Monitor overflows for both the Time Tagger's onboard buffer
-        # and the software buffer that the stream feeds into on our PC
-        num_hardware_overflows = self.tagger.getOverflowsAndClear()
-        has_software_overflows = buffer.hasOverflows
-        if (num_hardware_overflows > 0) or has_software_overflows:
-            logging.info(f"Num hardware overflows: {num_hardware_overflows}")
-            logging.info(f"Has software overflows: {has_software_overflows}")
-        timestamps = buffer.getTimestamps()
-        channels = buffer.getChannels()
-        return timestamps, channels
+            if self.stream is None:
+                logging.error("read_raw_stream attempted while stream is None.")
+                return
+            buffer = self.stream.getData()
+            # Monitor overflows for both the Time Tagger's onboard buffer
+            # and the software buffer that the stream feeds into on our PC
+            num_hardware_overflows = self.tagger.getOverflowsAndClear()
+            has_software_overflows = buffer.hasOverflows
+            if (num_hardware_overflows > 0) or has_software_overflows:
+                logging.info(f"Num hardware overflows: {num_hardware_overflows}")
+                logging.info(f"Has software overflows: {has_software_overflows}")
+            timestamps = buffer.getTimestamps()
+            channels = buffer.getChannels()
+            return timestamps, channels
 
     def read_counter_internal(self):
         if self.stream is None:
@@ -111,6 +113,7 @@ class TaggerSwab20(Tagger, LabradServer):
             apd_channels,
             self.leftover_channels,
         )
+
         # MCC: Bounce check
         # if 0 in np.array(return_counts):
         #     double_samples = [self.tagger_di_clock, self.tagger_di_clock]

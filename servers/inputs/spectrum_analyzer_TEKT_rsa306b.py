@@ -33,20 +33,19 @@ import logging
 class SpectrumAnalyzerTektRsa306b(LabradServer):
     name = "spectrum_analyzer_TEKT_rsa306b"
     pc_name = socket.gethostname()
+    logging.basicConfig(
+        level=logging.DEBUG,
+        format="%(asctime)s %(levelname)-8s %(message)s",
+        datefmt="%y-%m-%d_%H-%M-%S",
+        filename=(
+            "E:/Shared drives/Kolkowitz Lab"
+            " Group/nvdata/pc_{}/labrad_logging/{}.log".format(pc_name, name)
+        ),
+    )
 
     def initServer(self):
-        filename = (
-            "E:/Shared drives/Kolkowitz Lab Group/nvdata/pc_{}/labrad_logging/{}.log"
-        )
-        filename = filename.format(self.pc_name, self.name)
-        logging.basicConfig(
-            level=logging.DEBUG,
-            format="%(asctime)s %(levelname)-8s %(message)s",
-            datefmt="%y-%m-%d_%H-%M-%S",
-            filename=filename,
-        )
-
-        self.search_connect()  # Connect to the device - assume there is only one
+        # Connect to the device - assume there is only one
+        self.search_connect()
 
     ############ The code below is pulled from Tektronix sample code:
     # https://github.com/tektronix/RSA_API/blob/master/Python/Cython%20Version/cython_example.py
@@ -92,7 +91,9 @@ class SpectrumAnalyzerTektRsa306b(LabradServer):
         )
         spec_trace_1 = rsa_api.SpectrumTraces.SpectrumTrace1
         freqs = self.create_frequency_array(specSet)
-        powers = rsa_api.SPECTRUM_Acquire_py(spec_trace_1, specSet["traceLength"], 100)
+        powers = rsa_api.SPECTRUM_Acquire_py(
+            spec_trace_1, specSet["traceLength"], 100
+        )
         return freqs, powers
 
     @setting(0, freq_center="v[]", freq_range="v[]", returns="*v[]*v[]")
