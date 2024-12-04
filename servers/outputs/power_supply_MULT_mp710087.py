@@ -31,7 +31,6 @@ import socket
 import pyvisa as visa
 import time
 import numpy as np
-from utils import common
 
 
 class PowerSupplyMultMp710087(LabradServer):
@@ -53,10 +52,22 @@ class PowerSupplyMultMp710087(LabradServer):
         )
         self.current_limit = None
         self.voltage_limit = None
-        config = common.get_config_dict()
-        device_id = config["DeviceIDs"][f"{self.name}_visa_address"]
+        config = ensureDeferred(self.get_config())
+        config.addCallback(self.on_get_config)
+
+    async def get_config(self):
+        p = self.client.registry.packet()
+        p.cd(["", "Config", "DeviceIDs"])
+        p.get("{}_visa_address".format(self.name))
+        result = await p.send()
+        return result["get"]
+
+    def on_get_config(self, config):
         resource_manager = visa.ResourceManager()
-        self.power_supply = resource_manager.open_resource(device_id)
+        visa_address = config
+        logging.info(visa_address)
+        # visa_address = 'MCCTEST'
+        self.power_supply = resource_manager.open_resource(visa_address)
         self.power_supply.baud_rate = 115200
         self.power_supply.read_termination = "\n"
         self.power_supply.write_termination = "\n"
@@ -210,6 +221,7 @@ class PowerSupplyMultMp710087(LabradServer):
         tool_belt.reset_cfm
         """
         self.output_off(c)
+        
 
 
 def decode_query_response(response):

@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-Output server for the PI E709 objective piezo.
+Output server for the PI E709 objective piezo. 
 
 Created on Thu Apr  4 15:58:30 2019
 
@@ -18,23 +18,20 @@ timeout = 20
 
 [shutdown]
 message = 987654321
-timeout =
+timeout = 
 ### END NODE INFO
 """
 
+from labrad.server import LabradServer
+from labrad.server import setting
+from twisted.internet.defer import ensureDeferred
+from pipython import GCSDevice
+import nidaqmx
 import logging
+import numpy
+import nidaqmx.stream_writers as stream_writers
 import socket
 from pathlib import Path
-
-import nidaqmx
-import nidaqmx.stream_writers as stream_writers
-import numpy
-from labrad.server import LabradServer, setting
-from pipython import GCSDevice
-from twisted.internet.defer import ensureDeferred
-
-from utils import common
-from utils import tool_belt as tb
 
 
 class PosZPiPifoc(LabradServer):
@@ -42,55 +39,68 @@ class PosZPiPifoc(LabradServer):
     pc_name = socket.gethostname()
 
     def initServer(self):
-        tb.configure_logging(self)
+        filename = (
+            "E:/Shared drives/Kolkowitz Lab"
+            " Group/nvdata/pc_{}/labrad_logging/{}.log"
+        )
+        filename = filename.format(self.pc_name, self.name)
+        logging.basicConfig(
+            level=logging.INFO,
+            format="%(asctime)s %(levelname)-8s %(message)s",
+            datefmt="%y-%m-%d_%H-%M-%S",
+            filename=filename,
+        )
         self.task = None
         self.sub_init_server_z()
 
     def sub_init_server_z(self):
         """Sub-routine to be called by xyz server"""
-
         self.z_last_position = None
         self.z_current_direction = None
         self.z_last_turning_position = None
+        config = ensureDeferred(self.get_config_z())
+        config.addCallback(self.on_get_config_z)
+        # logging.info(self.z_hysteresis_b)
 
-        config = common.get_config_dict()
+    async def get_config_z(self):
+        p = self.client.registry.packet()
+        p.cd(["", "Config", "DeviceIDs"])
+        p.get("objective_piezo_model")
+        p.get("objective_piezo_serial")
+        p.cd(["", "Config", "Wiring", "Daq"])
+        p.get("ao_objective_piezo")
+        p.get("di_clock")
+        p.cd(["", "Config", "Positioning"])
+        p.get("z_hysteresis_linearity")
+        result = await p.send()
+        return result["get"]
 
-        # try:
-        gcs_dll_path = config["DeviceIDs"]["gcs_dll_path"]
-        model = config["DeviceIDs"]["objective_piezo_model"]
-        self.piezo = GCSDevice(devname=model, gcsdll=gcs_dll_path)
+    def on_get_config_z(self, config):
+        # Load the generic device
+        gcs_dll_path = str(Path.home())
+        gcs_dll_path += "\\Documents\\GitHub\\kolkowitz-nv-experiment-v1.0"
+        gcs_dll_path += (
+            "\\servers\\outputs\\GCSTranslator\\PI_GCS2_DLL_x64.dll"
+        )
+        # logging.info(gcs_dll_path)
+        self.piezo = GCSDevice(devname=config[0], gcsdll=gcs_dll_path)
         # Connect the specific device with the serial number
-        serial = config["DeviceIDs"]["objective_piezo_serial"]
-        self.piezo.ConnectUSB(serial)
+        self.piezo.ConnectUSB(config[1])
         # Just one axis for this device
         self.axis = self.piezo.axes[0]
         self.piezo.SPA(self.axis, 0x06000500, 2)  # External control mode
-        # except Exception as exc:
-        #     self.piezo = None
-        #     self.axis = None
-        #     logging.info("Failed to connect to piezo")
-        #     logging.info(exc)
-
-        daq_ao = config["Wiring"]["Daq"]["ao_objective_piezo"]
-        self.daq_ao_objective_piezo = daq_ao
-        daq_clock = config["Wiring"]["Daq"]["di_clock"]
-        self.daq_di_clock = daq_clock
-
-        if "z_hysteresis_linearity" in config["Positioning"]:
-            linearity = config["Positioning"]["xy_hysteresis_linearity"]
-        else:
-            linearity = 1
-        self.z_hysteresis_b = linearity
-        # Define "a" such that 1 nominal volt corresponds to
+        self.daq_ao_objective_piezo = config[2]
+        self.daq_di_clock = config[3]
+        self.z_hysteresis_b = config[4]
+        logging.info(self.z_hysteresis_b)
+        # Define a such that 1 nominal volt corresponds to
         # 1 post-compensation volt
         # p(v) = a * v**2 + b * v ==> 1 = a + b ==> a = 1 - b
         self.z_hysteresis_a = 1 - self.z_hysteresis_b
-
         logging.info("Init complete")
 
     def stopServer(self):
-        if self.piezo is not None:
-            self.piezo.CloseConnection()
+        self.piezo.CloseConnection()
 
     def compensate_hysteresis_z(self, position):
         """
@@ -138,6 +148,7 @@ class PosZPiPifoc(LabradServer):
         # on the nth value
         compensated_voltage = []
         for val in position:
+
             # First determine if we're turning around - if we're not moving,
             # don't consider us to be turning around
             movement_direction = numpy.sign(val - last_position)
@@ -169,6 +180,7 @@ class PosZPiPifoc(LabradServer):
             return numpy.array(compensated_voltage)
 
     def load_stream_writer_z(self, c, task_name, voltages, period):
+
         # Close the existing task if there is one
         if self.task is not None:
             self.close_task_internal()
@@ -195,7 +207,8 @@ class PosZPiPifoc(LabradServer):
         )
 
         # Set up the output stream
-        writer = stream_writers.AnalogSingleChannelWriter(task.out_stream)
+        output_stream = nidaqmx.task.OutStream(task)
+        writer = stream_writers.AnalogSingleChannelWriter(output_stream)
 
         # Configure the sample to advance on the rising edge of the PFI input.
         # The frequency specified is just the max expected rate in this case.
@@ -212,7 +225,9 @@ class PosZPiPifoc(LabradServer):
 
         task.start()
 
-    def close_task_internal(self, task_handle=None, status=None, callback_data=None):
+    def close_task_internal(
+        self, task_handle=None, status=None, callback_data=None
+    ):
         task = self.task
         if task is not None:
             task.close()
@@ -245,16 +260,38 @@ class PosZPiPifoc(LabradServer):
             # Set up the internal channels - to do: actual parsing...
             if self.daq_ao_objective_piezo == "dev1/AO2":
                 chan_name = "dev1/_ao2_vs_aognd"
-            task.ai_channels.add_ai_voltage_chan(chan_name, min_val=1.0, max_val=9.0)
+            task.ai_channels.add_ai_voltage_chan(
+                chan_name, min_val=1.0, max_val=9.0
+            )
             voltage = task.read()
         return voltage
 
-    @setting(23, coords_z="*v[]")
+    @setting(
+        23,
+        coords_z="*v[]"
+    )
     def load_stream_z(self, c, coords_z):
         """Load a linear sweep with the DAQ"""
-
+        
         period = 1e6
-        self.load_stream_writer_z(c, "ObjectivePiezo-load_scan_z", coords_z, period)
+        self.load_stream_writer_z(
+            c, "ObjectivePiezo-load_scan_z", coords_z, period
+        )
+        
+    # +++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+    @setting(24, z_voltages="*v[]", period="i", returns="*v[]")
+    def load_arb_scan_z(self, c, z_voltages, period):
+        """Load a list of voltages with the DAQ"""
+
+        self.load_stream_writer_z(
+            c,
+            "ObjectivePiezo-load_arb_scan_z",
+            numpy.array(z_voltages),
+            period,
+        )
+        return z_voltages
+
+    # +++++++++++++++++++++++++++++++++++++++++++++++++++++++++
 
 
 __server__ = PosZPiPifoc()
@@ -263,18 +300,3 @@ if __name__ == "__main__":
     from labrad import util
 
     util.runServer(__server__)
-
-    # config = common.get_config_dict()
-    # gcs_dll_path = config["DeviceIDs"]["gcs_dll_path"]
-    # model = config["DeviceIDs"]["objective_piezo_model"]
-    # with GCSDevice(devname=model, gcsdll=gcs_dll_path) as piezo:
-    #     serial = config["DeviceIDs"]["objective_piezo_serial"]
-    #     print(piezo.EnumerateUSB())
-    #     piezo.ConnectUSB(serial)
-    #     # Just one axis for this device
-    #     axis = piezo.axes[0]
-    #     piezo.SPA(axis, 0x06000500, 2)  # External control mode
-    #     daq_ao = config["Wiring"]["Daq"]["ao_objective_piezo"]
-    #     daq_ao_objective_piezo = daq_ao
-    #     daq_clock = config["Wiring"]["Daq"]["di_clock"]
-    #     daq_di_clock = daq_clock

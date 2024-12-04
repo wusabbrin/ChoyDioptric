@@ -29,8 +29,6 @@ from labrad.server import setting
 from twisted.internet.defer import ensureDeferred
 import socket
 import logging
-from utils import common
-from utils import tool_belt as tb
 
 # telnetlib is a package for connecting to networked device over the telnet
 # protocol. See the ANC150 section of the cryostat manual for more details on
@@ -43,7 +41,17 @@ class PosXyzAttoPiezos(LabradServer):
     pc_name = socket.gethostname()
 
     def initServer(self):
-        tb.configure_logging(self)
+        filename = (
+            "E:/Shared drives/Kolkowitz Lab"
+            " Group/nvdata/pc_{}/labrad_logging/{}.log"
+        )
+        filename = filename.format(self.pc_name, self.name)
+        logging.basicConfig(
+            level=logging.DEBUG,
+            format="%(asctime)s %(levelname)-8s %(message)s",
+            datefmt="%y-%m-%d_%H-%M-%S",
+            filename=filename,
+        )
         self.task = None
         config = ensureDeferred(self.get_config())
         config.addCallback(self.on_get_config)
@@ -55,11 +63,13 @@ class PosXyzAttoPiezos(LabradServer):
         p.cd(["", "Config", "Positioning"])
         p.get("cryo_piezos_voltage")
         p.get("z_bias_adjust")
+        result = await p.send()
+        return result["get"]
 
-        config = common.get_config_dict()
-        ip_address = config["DeviceIDs"][f"{self.name}_ip"]
-        cryo_piezos_voltage = config["Positioning"]["cryo_piezos_voltage"]
-        self.z_bias_adjust = config["Positioning"]["z_bias_adjust"]
+    def on_get_config(self, reg_vals):
+        ip_address = reg_vals[0]
+        cryo_piezos_voltage = reg_vals[1]
+        self.z_bias_adjust = reg_vals[2]
         if self.z_bias_adjust >= 0.5:
             raise ValueError("abs(bias adjust) must be < 0.5")
         # Connect via telnet
@@ -85,6 +95,7 @@ class PosXyzAttoPiezos(LabradServer):
         logging.debug("Init complete")
 
     def write_ax(self, pos_in_steps, ax):
+
         steps_to_move = pos_in_steps - self.pos[ax - 1]
         if steps_to_move == 0:
             return
@@ -102,7 +113,9 @@ class PosXyzAttoPiezos(LabradServer):
         else:
             cmd = "stepd"
             if ax == 3:
-                abs_steps_to_move = round((1 - self.z_bias_adjust) * abs_steps_to_move)
+                abs_steps_to_move = round(
+                    (1 - self.z_bias_adjust) * abs_steps_to_move
+                )
         self.send_cmd(cmd, ax, abs_steps_to_move)
 
         # Set to ground mode once we're done stepping
@@ -138,7 +151,9 @@ class PosXyzAttoPiezos(LabradServer):
 
         if arg is not None:
             arg_enc = str(arg).encode("ascii")
-            self.piezos.write(cmd_enc + b" " + axis_enc + b" " + arg_enc + b"\r\n")
+            self.piezos.write(
+                cmd_enc + b" " + axis_enc + b" " + arg_enc + b"\r\n"
+            )
         else:
             self.piezos.write(cmd_enc + b" " + axis_enc + b"\r\n")
         self.piezos.read_until(b"> ")

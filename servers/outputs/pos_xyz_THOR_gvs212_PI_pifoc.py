@@ -35,7 +35,6 @@ from pipython import GCSDevice
 from pathlib import Path
 from servers.outputs.pos_xy_THOR_gvs212 import PosXyThorGvs212
 from servers.outputs.pos_z_PI_pifoc import PosZPiPifoc
-from utils import common
 
 
 class PosXyzThorgvs212PiPifoc(PosXyThorGvs212, PosZPiPifoc):

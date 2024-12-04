@@ -53,7 +53,7 @@ class PiezoStageAndPKZ101(PiezoStage, ZPiezoKpz101):
             filename=filename,
         )
         self.task = None
-
+        
         logging.debug("before init")
         self.sub_init_server_xy()
         self.sub_init_server_z()
@@ -63,6 +63,7 @@ class PiezoStageAndPKZ101(PiezoStage, ZPiezoKpz101):
         self.close_task_internal()
 
     def load_stream_writer_xyz(self, c, task_name, voltages, period):
+
         # Close the existing task if there is one
         if self.task is not None:
             self.close_task_internal()
@@ -81,14 +82,12 @@ class PiezoStageAndPKZ101(PiezoStage, ZPiezoKpz101):
 
         # Set up the output channels
         task.ao_channels.add_ao_voltage_chan(
-            self.daq_ao_piezo_stage_x,
-            min_val=-self.daq_voltage_range_factor,
-            max_val=self.daq_voltage_range_factor,
+            self.daq_ao_piezo_stage_x, min_val=-self.daq_voltage_range_factor, 
+                                        max_val=self.daq_voltage_range_factor
         )
         task.ao_channels.add_ao_voltage_chan(
-            self.daq_ao_piezo_stage_y,
-            min_val=-self.daq_voltage_range_factor,
-            max_val=self.daq_voltage_range_factor,
+            self.daq_ao_piezo_stage_y, min_val=-self.daq_voltage_range_factor, 
+                                        max_val=self.daq_voltage_range_factor
         )
         task.ao_channels.add_ao_voltage_chan(
             self.daq_ao_z_piezo_kpz101, min_val=0.0, max_val=10.0
@@ -101,7 +100,7 @@ class PiezoStageAndPKZ101(PiezoStage, ZPiezoKpz101):
         # Configure the sample to advance on the rising edge of the PFI input.
         # The frequency specified is just the max expected rate in this case.
         # We'll stop once we've run all the samples.
-        freq = float(1 / (period * (10**-9)))  # freq in seconds as a float
+        freq = float(1 / (period * (10 ** -9)))  # freq in seconds as a float
         task.timing.cfg_samp_clk_timing(
             freq, source=self.daq_di_clock, samps_per_chan=num_stream_voltages
         )
@@ -116,7 +115,7 @@ class PiezoStageAndPKZ101(PiezoStage, ZPiezoKpz101):
     @setting(11, x_points="*v[]", y_points="*v[]", z_points="*v[]", period="i")
     def load_arb_scan_xyz(self, c, x_points, y_points, z_points, period):
         """
-        Load a scan around a seuqence of arbitrary xyz points
+        Load a scan around a seuqence of arbitrary xyz points 
 
         Params
             x_points: list(float)
@@ -137,7 +136,7 @@ class PiezoStageAndPKZ101(PiezoStage, ZPiezoKpz101):
         )
 
         return
-
+    
     @setting(
         12,
         x_center="v[]",
@@ -156,7 +155,7 @@ class PiezoStageAndPKZ101(PiezoStage, ZPiezoKpz101):
 
         Normal scan performed, starts in bottom right corner, and starts
         heading left
-
+        
 
         Params
             x_center: float
@@ -198,6 +197,7 @@ class PiezoStageAndPKZ101(PiezoStage, ZPiezoKpz101):
         # Apply scale and offset to get the voltages we'll apply.
         x_voltages_1d = numpy.linspace(x_low, x_high, num_steps)
         z_voltages_1d = numpy.linspace(z_low, z_high, num_steps)
+    
 
         ######### Works for any x_range, y_range #########
 
@@ -216,15 +216,13 @@ class PiezoStageAndPKZ101(PiezoStage, ZPiezoKpz101):
 
         # [4, 5, 6] => [4, 4, 4, 5, 5, 5, 6, 6, 6]
         z_voltages = numpy.repeat(z_voltages_1d, x_num_steps)
-
+        
         y_voltages = numpy.empty(len(z_voltages))
         y_voltages.fill(y_center)
 
-        voltages = numpy.vstack((x_voltages, y_voltages, z_voltages))
+        voltages = numpy.vstack((x_voltages,y_voltages, z_voltages))
 
-        self.load_stream_writer_xyz(
-            c, "GalvoAndObjectivePiezo-load_sweep_scan_xz", voltages, period
-        )
+        self.load_stream_writer_xyz(c, "GalvoAndObjectivePiezo-load_sweep_scan_xz", voltages, period)
 
         return x_voltages_1d, z_voltages_1d
 

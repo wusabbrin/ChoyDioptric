@@ -33,7 +33,6 @@ import nidaqmx.stream_writers as stream_writers
 from nidaqmx.constants import AcquisitionType
 import time
 from servers.outputs.interfaces.sig_gen_vector import SigGenVector
-from utils import common
 
 
 class SigGenTektTsg4104a(LabradServer, SigGenVector):
@@ -42,7 +41,8 @@ class SigGenTektTsg4104a(LabradServer, SigGenVector):
 
     def initServer(self):
         filename = (
-            "E:/Shared drives/Kolkowitz Lab" " Group/nvdata/pc_{}/labrad_logging/{}.log"
+            "E:/Shared drives/Kolkowitz Lab"
+            " Group/nvdata/pc_{}/labrad_logging/{}.log"
         )
         filename = filename.format(self.pc_name, self.name)
         # logging.info('here')
@@ -52,10 +52,26 @@ class SigGenTektTsg4104a(LabradServer, SigGenVector):
             datefmt="%y-%m-%d_%H-%M-%S",
             filename=filename,
         )
-        config = common.get_config_dict()
-        device_id = config["DeviceIDs"]["signal_generator_tsg4104a_visa_address"]
+        config = ensureDeferred(self.get_config())
+        config.addCallback(self.on_get_config)
+
+    # def stopServer(self):
+    #     self.sig_gen.close()
+
+    async def get_config(self):
+        p = self.client.registry.packet()
+        p.cd(["", "Config", "DeviceIDs"])
+        p.get("signal_generator_tsg4104a_visa_address")
+        # p.cd(['', 'Config', 'Wiring', 'Daq'])
+        # p.get('di_clock')
+        # p.get('ao_uwave_sig_gen_mod')
+        result = await p.send()
+        return result["get"]
+
+    def on_get_config(self, config):
+
         resource_manager = visa.ResourceManager()
-        self.sig_gen = resource_manager.open_resource(device_id, open_timeout=60)
+        self.sig_gen = resource_manager.open_resource(config, open_timeout=60)
         # Set the VISA read and write termination. This is specific to the
         # instrument - you can find it in the instrument's programming manual
         self.sig_gen.read_termination = "\r\n"

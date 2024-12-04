@@ -32,8 +32,6 @@ import numpy as np
 import logging
 import socket
 from servers.outputs.interfaces.pos_xy_stream import PosXyStream
-from utils import common
-from utils import tool_belt as tb
 
 
 class PosXyThorGvs212(LabradServer, PosXyStream):
@@ -41,17 +39,37 @@ class PosXyThorGvs212(LabradServer, PosXyStream):
     pc_name = socket.gethostname()
 
     def initServer(self):
-        tb.configure_logging(self)
+        filename = (
+            "E:/Shared drives/Kolkowitz Lab" " Group/nvdata/pc_{}/labrad_logging/{}.log"
+        )
+        filename = filename.format(self.pc_name, self.name)
+        logging.basicConfig(
+            level=logging.INFO,
+            format="%(asctime)s %(levelname)-8s %(message)s",
+            datefmt="%y-%m-%d_%H-%M-%S",
+            filename=filename,
+        )
         self.task = None
         self.sub_init_server_xy()
 
     def sub_init_server_xy(self):
         """Sub-routine to be called by xyz server"""
-        config = common.get_config_dict()
-        wiring = config["Wiring"]["Daq"]
-        self.daq_ao_galvo_x = wiring["ao_galvo_x"]
-        self.daq_ao_galvo_y = wiring["ao_galvo_y"]
-        self.daq_di_clock = wiring["di_clock"]
+        config = ensureDeferred(self.get_config_xy())
+        config.addCallback(self.on_get_config_xy)
+
+    async def get_config_xy(self):
+        p = self.client.registry.packet()
+        p.cd(["", "Config", "Wiring", "Daq"])
+        p.get("ao_galvo_x")
+        p.get("ao_galvo_y")
+        p.get("di_clock")
+        result = await p.send()
+        return result["get"]
+
+    def on_get_config_xy(self, config):
+        self.daq_ao_galvo_x = config[0]
+        self.daq_ao_galvo_y = config[1]
+        self.daq_di_clock = config[2]
         logging.debug("Init complete")
 
     def stopServer(self):
@@ -90,22 +108,6 @@ class PosXyThorGvs212(LabradServer, PosXyStream):
             )
             task.write([xVoltage, yVoltage])
 
-    def _write_single_ax(self, voltage, chan):
-        if self.task is not None:
-            self.close_task_internal()
-
-        with nidaqmx.Task() as task:
-            task.ao_channels.add_ao_voltage_chan(chan, min_val=-10.0, max_val=10.0)
-            task.write(voltage)
-
-    @setting(30, xVoltage="v[]")
-    def write_x(self, c, xVoltage):
-        return self._write_single_ax(xVoltage, self.daq_ao_galvo_x)
-
-    @setting(31, yVoltage="v[]")
-    def write_y(self, c, yVoltage):
-        return self._write_single_ax(yVoltage, self.daq_ao_galvo_y)
-
     @setting(1, returns="*v[]")
     def read_xy(self, c):
         """Return the current voltages on the x and y channels.
@@ -129,6 +131,7 @@ class PosXyThorGvs212(LabradServer, PosXyStream):
 
     @setting(2, coords_x="*v[]", coords_y="*v[]", continuous="b")
     def load_stream_xy(self, c, coords_x, coords_y, continuous=False):
+
         voltages = np.vstack((coords_x, coords_y))
 
         # Close the existing task if there is one
@@ -158,7 +161,8 @@ class PosXyThorGvs212(LabradServer, PosXyStream):
         )
 
         # Set up the output stream
-        writer = stream_writers.AnalogMultiChannelWriter(task.out_stream)
+        output_stream = nidaqmx.task.OutStream(task)
+        writer = stream_writers.AnalogMultiChannelWriter(output_stream)
 
         # Configure the sample to advance on the rising edge of the PFI input.
         # The frequency specified is just the max expected rate in this case.
@@ -183,64 +187,7 @@ class PosXyThorGvs212(LabradServer, PosXyStream):
         # Close the task once we've written all the samples
         task.register_done_event(self.close_task_internal)
         task.start()
-
-    def _load_stream_single_ax(self, coords, chan, continuous=False):
-        # Close the existing task if there is one
-        if self.task is not None:
-            self.close_task_internal()
-
-        # Write the initial voltage and stream the rest
-        num_voltages = len(coords)
-        self._write_single_ax(coords[0], chan)
-        if continuous:
-            # Perfect loop for continuous
-            stream_voltages = np.roll(coords, -1)
-        else:
-            stream_voltages = coords[1:num_voltages]
-        stream_voltages = np.ascontiguousarray(stream_voltages)
-        num_stream_voltages = num_voltages - 1
-        # Create a new task
-        task = nidaqmx.Task(f"{self.name}-load_stream_single_ax")
-        self.task = task
-
-        # Set up the output channels
-        task.ao_channels.add_ao_voltage_chan(chan, min_val=-10.0, max_val=10.0)
-
-        # Set up the output stream
-        writer = stream_writers.AnalogSingleChannelWriter(task.out_stream)
-
-        # Configure the sample to advance on the rising edge of the PFI input.
-        # The frequency specified is just the max expected rate in this case.
-        # We'll stop once we've run all the samples.
-        freq = 100  # Just guess a data rate of 100 Hz
-        if continuous:
-            task.timing.cfg_samp_clk_timing(
-                freq,
-                source=self.daq_di_clock,
-                samps_per_chan=num_stream_voltages,
-                sample_mode=AcquisitionType.CONTINUOUS,
-            )
-        else:
-            task.timing.cfg_samp_clk_timing(
-                freq,
-                source=self.daq_di_clock,
-                samps_per_chan=num_stream_voltages,
-            )
-
-        writer.write_many_sample(stream_voltages)
-
-        # Close the task once we've written all the samples
-        task.register_done_event(self.close_task_internal)
-        task.start()
-
-    @setting(33, coords_x="*v[]", continuous="b")
-    def load_stream_x(self, c, coords_x, continuous=False):
-        return self._load_stream_single_ax(coords_x, self.daq_ao_galvo_x, continuous)
-
-    @setting(34, coords_y="*v[]", continuous="b")
-    def load_stream_y(self, c, coords_y, continuous=False):
-        return self._load_stream_single_ax(coords_y, self.daq_ao_galvo_y, continuous)
-
+        
     @setting(3)
     def reset(self, c):
         self.close_task_internal()
