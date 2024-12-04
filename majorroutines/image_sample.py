@@ -9,26 +9,16 @@ Created on April 9th, 2019
 """
 
 
-import time
-from enum import Enum, auto
-
-import labrad
 import matplotlib.pyplot as plt
 import numpy as np
-from scipy import ndimage
-
-import majorroutines.targeting as targeting
-from utils import common
-from utils import kplotlib as kpl
-from utils import positioning as pos
-from utils import tool_belt as tb
-from utils.constants import CollectionMode, CountFormat, PosControlMode, VirtualLaserKey
-
-
-class ScanAxes(Enum):
-    XY = auto()
-    XZ = auto()
-    YZ = auto()
+import utils.tool_belt as tool_belt
+from utils.positioning import ControlStyle
+import utils.common as common
+import time
+import labrad
+import majorroutines.optimize as optimize
+import utils.kplotlib as kpl
+import utils.positioning as positioning
 
 
 def populate_img_array(valsToAdd, imgArray, writePos):
@@ -88,321 +78,615 @@ def populate_img_array(valsToAdd, imgArray, writePos):
 
 
 def main(
-    nv_sig, range_1, range_2, num_steps, nv_minus_init=False, scan_axes=ScanAxes.XY
+    nv_sig,
+    x_range,
+    y_range,
+    num_steps,
+    um_scaled=True,
+    nv_minus_init=False,
+    vmin=None,
+    vmax=None,
+    scan_type="XY",
 ):
-    with common.labrad_connect() as cxn:
-        return main_with_cxn(
-            cxn, nv_sig, range_1, range_2, num_steps, nv_minus_init, scan_axes
+
+    with labrad.connect() as cxn:
+        img_array, x_voltages, y_voltages = main_with_cxn(
+            cxn,
+            nv_sig,
+            x_range,
+            y_range,
+            num_steps,
+            um_scaled,
+            nv_minus_init,
+            vmin,
+            vmax,
+            scan_type,
         )
+        
+    return img_array, x_voltages, y_voltages
+
+
+# %%
+
+# def main_with_cxn_old(
+#     cxn,
+#     nv_sig,
+#     x_range,
+#     y_range,
+#     num_steps,
+#     um_scaled=False,
+#     nv_minus_init=False,
+#     vmin=None,
+#     vmax=None,
+# ):
+
+#     ### Some initial setup
+
+#     tool_belt.reset_cfm(cxn)
+#     x_center, y_center, z_center = positioning.set_xyz_on_nv(cxn, nv_sig)
+#     optimize.prepare_microscope(cxn, nv_sig)
+#     xy_server = positioning.get_server_pos_xy(cxn)
+#     counter = tool_belt.get_server_counter(cxn)
+#     pulse_gen = tool_belt.get_server_pulse_gen(cxn)
+#     total_num_samples = num_steps**2
+
+#     laser_key = "imaging_laser"
+#     readout_laser = nv_sig[laser_key]
+#     tool_belt.set_filter(cxn, nv_sig, laser_key)
+#     time.sleep(1)
+#     readout_power = tool_belt.set_laser_power(cxn, nv_sig, laser_key)
+
+#     # See if this setup has finely specified delay times, else just get the
+#     # one-size-fits-all value.
+#     dir_path = ["", "Config", "Positioning"]
+#     cxn.registry.cd(*dir_path)
+#     _, keys = cxn.registry.dir()
+
+#     if "xy_small_response_delay" in keys:
+#         xy_delay = tool_belt.get_registry_entry(
+#             cxn, "xy_small_response_delay", dir_path
+#         )
+#     else:
+#         xy_delay = tool_belt.get_registry_entry(cxn, "xy_delay", dir_path)
+
+#     # Get the scale in um per unit
+#     xy_scale = tool_belt.get_registry_entry(cxn, "xy_nm_per_unit", dir_path)
+#     if xy_scale == -1:
+#         um_scaled = False
+#     else:
+#         xy_scale *= 1000
+
+#     try:
+#         xy_units = common.get_registry_entry_no_cxn(
+#             "xy_units", ["", "Config", "Positioning"]
+#         )
+#     except Exception as exc:
+#         print("xy_units not in config")
+#         xy_units = None
+
+#     ### Load the pulse generator
+
+#     readout = nv_sig["imaging_readout_dur"]
+#     readout_sec = readout / 10**9
+#     readout_us = readout / 10**3
+
+#     if nv_minus_init:
+#         laser_key = "nv-_prep_laser"
+#         tool_belt.set_filter(cxn, nv_sig, laser_key)
+#         init = nv_sig["{}_dur".format(laser_key)]
+#         init_laser = nv_sig[laser_key]
+#         init_power = tool_belt.set_laser_power(cxn, nv_sig, laser_key)
+#         seq_args = [init, readout, init_laser, init_power, readout_laser, readout_power]
+#         seq_args_string = tool_belt.encode_seq_args(seq_args)
+#         seq_name = "charge_init-simple_readout.py"
+#     else:
+#         seq_args = [xy_delay, readout, readout_laser, readout_power]
+#         seq_args_string = tool_belt.encode_seq_args(seq_args)
+#         seq_name = "simple_readout.py"
+#     ret_vals = pulse_gen.stream_load(seq_name, seq_args_string)
+#     period = ret_vals[0]
+
+#     ### Set up the xy_server
+
+#     x_num_steps = num_steps
+#     y_num_steps = num_steps
+#     ret_vals = positioning.get_scan_grid_2d(
+#         x_center, y_center, x_range, y_range, x_num_steps, y_num_steps)
+
+#     x_voltages, y_voltages, x_voltages_1d, y_voltages_1d, extent = ret_vals
+
+#     xy_server.load_stream_xy(x_voltages, y_voltages)
+
+#     ### Set up our raw data objects
+
+#     # Initialize img_array and set all values to NaN so that unset values
+#     # are not interpreted as 0 by matplotlib's colobar
+#     img_array = np.empty((x_num_steps, y_num_steps))
+#     img_array[:] = np.nan
+#     img_array_kcps = np.copy(img_array)
+#     img_write_pos = []
+
+#     ### Set up the image display
+
+#     kpl.init_kplotlib(font_size=kpl.Size.SMALL, no_latex=True)
+
+#     if um_scaled:
+#         extent = [el * xy_scale for el in extent]
+#         axes_labels = ["um", "um"]
+#     elif xy_units is not None:
+#         axes_labels = [xy_units, xy_units]
+
+#     readout_laser_text = kpl.tex_escape(readout_laser)
+#     title = f"XY image under {readout_laser_text}, {readout_us} us readout"
+
+#     fig, ax = plt.subplots()
+#     kpl.imshow(
+#         ax,
+#         img_array_kcps,
+#         title=title,
+#         axes_labels=axes_labels,
+#         cbar_label="kcps",
+#         extent=extent,
+#         vmin=vmin,
+#         vmax=vmax,
+#     )
+
+#     ### Collect the data
+
+#     counter.start_tag_stream()
+#     pulse_gen.stream_start(total_num_samples)
+
+#     charge_init = nv_minus_init
+
+#     timeout_duration = ((period * (10**-9)) * total_num_samples) + 10
+#     timeout_inst = time.time() + timeout_duration
+#     num_read_so_far = 0
+#     tool_belt.init_safe_stop()
+
+#     while num_read_so_far < total_num_samples:
+
+#         if (time.time() > timeout_inst) or tool_belt.safe_stop():
+#             break
+
+#         # Read the samples
+#         if charge_init:
+#             new_samples = counter.read_counter_modulo_gates(2)
+#         else:
+#             new_samples = counter.read_counter_simple()
+
+#         # Update the image
+#         num_new_samples = len(new_samples)
+#         if num_new_samples > 0:
+#             # If we did charge initialization, subtract out the non-initialized counts
+#             if charge_init:
+#                 new_samples = [max(int(el[0]) - int(el[1]), 0) for el in new_samples]
+#             populate_img_array(new_samples, img_array, img_write_pos)
+#             img_array_kcps[:] = (img_array[:] / 1000) / readout_sec
+#             kpl.imshow_update(ax, img_array_kcps, vmin, vmax)
+#             num_read_so_far += num_new_samples
+
+#     ### Clean up and save the data
+
+#     tool_belt.reset_cfm(cxn)
+#     xy_server.write_xy(x_center, y_center)
+
+#     timestamp = tool_belt.get_time_stamp()
+#     rawData = {
+#         "timestamp": timestamp,
+#         "nv_sig": nv_sig,
+#         "nv_sig-units": tool_belt.get_nv_sig_units(),
+#         "x_center": x_center,
+#         "y_center": y_center,
+#         "z_center": z_center,
+#         "x_range": x_range,
+#         "x_range-units": xy_units,
+#         "y_range": y_range,
+#         "y_range-units": xy_units,
+#         "num_steps": num_steps,
+#         "readout": readout,
+#         "readout-units": "ns",
+#         "title": title,
+#         "axes_labels": axes_labels,
+#         "extent": extent,
+#         "xy_scale": xy_scale,
+#         "x_voltages_1d": x_voltages_1d,
+#         "x_voltages_1d-units": "V",
+#         "y_voltages_1d": y_voltages_1d,
+#         "y_voltages_1d-units": "V",
+#         "img_array": img_array.astype(int),
+#         "img_array-units": "counts",
+#     }
+
+#     filePath = tool_belt.get_file_path(__file__, timestamp, nv_sig["name"])
+#     tool_belt.save_raw_data(rawData, filePath)
+#     tool_belt.save_figure(fig, filePath)
+
+#     return img_array, x_voltages_1d, y_voltages_1d
+# %%
+# merged
 
 
 def main_with_cxn(
-    cxn, nv_sig, range_1, range_2, num_steps, nv_minus_init=False, scan_axes=ScanAxes.XY
+    cxn,
+    nv_sig,
+    x_range,
+    y_range,
+    num_steps,
+    um_scaled=True,
+    nv_minus_init=False,
+    vmin=None,
+    vmax=None,
+    scan_type="YZ",
 ):
+
     ### Some initial setup
+    xy_control_style = positioning.get_xy_control_style(cxn)
 
-    config = common.get_config_dict()
-    config_positioning = config["Positioning"]
-    collection_mode = config["collection_mode"]
-    xy_control_mode = pos.get_xy_control_mode()
-    z_control_mode = pos.get_z_control_mode()
-    if scan_axes == ScanAxes.XY:
-        control_mode = xy_control_mode
-    elif (
-        xy_control_mode == PosControlMode.STREAM
-        and z_control_mode == PosControlMode.STREAM
-    ):
-        control_mode = PosControlMode.STREAM
+    tool_belt.reset_cfm(cxn)
+    x_center, y_center, z_center = positioning.set_xyz_on_nv(cxn, nv_sig)
+    optimize.prepare_microscope(cxn, nv_sig)
+    xy_server = positioning.get_server_pos_xy(cxn)
+    # print(xy_server)
+    xyz_server = positioning.get_server_pos_xyz(cxn)
+    counter = tool_belt.get_server_counter(cxn)
+    pulse_gen = tool_belt.get_server_pulse_gen(cxn)
+    total_num_samples = num_steps**2
+
+    laser_key = "imaging_laser"
+    readout_laser = nv_sig[laser_key]
+    tool_belt.set_filter(cxn, nv_sig, laser_key)
+    time.sleep(1)
+    readout_power = tool_belt.set_laser_power(cxn, nv_sig, laser_key)
+    # See if this setup has finely specified delay times, else just get the
+    # one-size-fits-all value.
+    dir_path = ["", "Config", "Positioning"]
+    cxn.registry.cd(*dir_path)
+    _, keys = cxn.registry.dir()
+
+    if "xy_small_response_delay" in keys:
+        xy_delay = common.get_registry_entry(cxn, "xy_small_response_delay", dir_path)
     else:
-        control_mode = PosControlMode.STEP
+        xy_delay = common.get_registry_entry(cxn, "xy_delay", dir_path)
 
-    tb.reset_cfm(cxn)
-    center_coords = pos.adjust_coords_for_drift(nv_sig["coords"])
-    x_center, y_center, z_center = center_coords
-    targeting.pos.set_xyz_on_nv(cxn, nv_sig)
-    pos_server = (
-        pos.get_server_pos_xy(cxn)
-        if scan_axes == ScanAxes.XY
-        else pos.get_server_pos_xyz(cxn)
+    # Get the scale in um per unit
+    xy_scale = common.get_registry_entry(cxn, "xy_nm_per_unit", dir_path)
+    if xy_scale == -1:
+        um_scaled = False
+    else:
+        xy_scale *= 1000
+
+    z_delay = common.get_registry_entry(cxn, "z_delay", ["", "Config", "Positioning"])
+    z_scale = common.get_registry_entry(
+        cxn, "z_nm_per_unit", ["", "Config", "Positioning"]
     )
-    if collection_mode == CollectionMode.COUNTER:
-        counter = tb.get_server_counter(cxn)
-    elif collection_mode == CollectionMode.CAMERA:
-        camera = tb.get_server_camera(cxn)
-    pulse_gen = tb.get_server_pulse_gen(cxn)
+    # use whichever delay is longer:
+    if (z_delay > xy_delay) and scan_type == "XZ" :
+        delay = z_delay
+    elif (z_delay > xy_delay) and scan_type == "YZ" :
+        delay = z_delay
+    else:
+        delay = xy_delay
 
-    laser_key = VirtualLaserKey.IMAGING
-    laser_dict = nv_sig[laser_key]
-    readout_laser = laser_dict["name"]
-    tb.set_filter(cxn, nv_sig, laser_key)
-    readout_power = tb.set_laser_power(cxn, nv_sig, laser_key)
-
-    xy_delay = config_positioning["xy_delay"]
-    z_delay = config_positioning["z_delay"]
-    scanning_z = scan_axes in [ScanAxes.XZ, ScanAxes.YZ]
-    delay = max(xy_delay, z_delay) if scanning_z else xy_delay
-
-    xy_units = config_positioning["xy_units"]
-    z_units = config_positioning["z_units"]
-    axis_1_units = xy_units
-    axis_2_units = xy_units if scan_axes == ScanAxes.XY else z_units
-
-    # Only support square grids at the moment
-    num_steps_1 = num_steps
-    num_steps_2 = num_steps
-    total_num_samples = num_steps_1 * num_steps_2
+    try:
+        xy_units = common.get_registry_entry(
+            cxn, "xy_units", ["", "Config", "Positioning"]
+        )
+        z_units = common.get_registry_entry(
+            cxn, "z_units", ["", "Config", "Positioning"]
+        )
+    except Exception as exc:
+        print("xy_units or z_units not in config")
+        xy_units = None
+        z_units = None
 
     ### Load the pulse generator
 
-    readout = laser_dict["readout_dur"]
+    readout = nv_sig["imaging_readout_dur"]
     readout_us = readout / 10**3
     readout_sec = readout / 10**9
 
-    if collection_mode == CollectionMode.CAMERA:
-        seq_args = [delay, readout, readout_laser, readout_power]
-        seq_args_string = tb.encode_seq_args(seq_args)
-        seq_file = "widefield-simple_readout.py"
-    elif collection_mode == CollectionMode.COUNTER:
-        if nv_minus_init:
-            laser_key = "nv-_prep_laser"
-            tb.set_filter(cxn, nv_sig, laser_key)
-            init = nv_sig["{}_dur".format(laser_key)]
-            init_laser = nv_sig[laser_key]
-            init_power = tb.set_laser_power(cxn, nv_sig, laser_key)
-            seq_args = [
-                init,
-                readout,
-                init_laser,
-                init_power,
-                readout_laser,
-                readout_power,
-            ]
-            seq_args_string = tb.encode_seq_args(seq_args)
-            seq_file = "charge_init-simple_readout.py"
-        else:
-            seq_args = [delay, readout, readout_laser, readout_power]
-            seq_args_string = tb.encode_seq_args(seq_args)
-            seq_file = "simple_readout.py"
+    if nv_minus_init:
+        laser_key = "nv-_prep_laser"
+        tool_belt.set_filter(cxn, nv_sig, laser_key)
+        init = nv_sig["{}_dur".format(laser_key)]
+        init_laser = nv_sig[laser_key]
+        init_power = tool_belt.set_laser_power(cxn, nv_sig, laser_key)
+        seq_args = [init, readout, init_laser, init_power, readout_laser, readout_power]
+        seq_args_string = tool_belt.encode_seq_args(seq_args)
+        seq_file = "charge_init-simple_readout.py"
+    else:
+        seq_args = [xy_delay, readout, readout_laser, readout_power]
+        seq_args_string = tool_belt.encode_seq_args(seq_args)
+        seq_file = "simple_readout.py"
 
-    # print(seq_file)
     # print(seq_args)
     # return
     ret_vals = pulse_gen.stream_load(seq_file, seq_args_string)
     period = ret_vals[0]
 
-    ### Set up the xy_server (xyz_server if 'xz' scan_axes)
+    ### Set up the xy_server (xyz_server if 'xz' scan_type)
 
-    if scan_axes == ScanAxes.XY:
-        center_1 = x_center
-        center_2 = y_center
-    elif scan_axes == ScanAxes.XZ:
-        center_1 = x_center
-        center_2 = z_center
-    elif scan_axes == ScanAxes.YZ:
-        center_1 = y_center
-        center_2 = z_center
-    ret_vals = pos.get_scan_grid_2d(
-        center_1, center_2, range_1, range_2, num_steps_1, num_steps_2
-    )
-    coords_1, coords_2, coords_1_1d, coords_2_1d, extent = ret_vals
-    num_pixels = num_steps_1 * num_steps_2
+    x_num_steps = num_steps
+    y_num_steps = num_steps
 
-    if control_mode == PosControlMode.STREAM:
-        if scan_axes == ScanAxes.XY:
-            pos_server.load_stream_xy(coords_1, coords_2)
-        elif scan_axes == ScanAxes.XZ:
-            y_vals_static = [y_center] * num_pixels
-            pos_server.load_stream_xyz(coords_1, y_vals_static, coords_2)
-        elif scan_axes == ScanAxes.YZ:
-            x_vals_static = [x_center] * num_pixels
-            pos_server.load_stream_xyz(x_vals_static, coords_1, coords_2)
+    if scan_type == "XY":
+        ret_vals = positioning.get_scan_grid_2d(
+            x_center, y_center, x_range, y_range, x_num_steps, y_num_steps
+        )
+    elif scan_type == "XZ":
+        ret_vals = positioning.get_scan_grid_2d(
+            x_center, z_center,x_range, y_range, x_num_steps, y_num_steps)
+    elif scan_type == 'YZ':
+        ret_vals = positioning.get_scan_grid_2d(
+            y_center, z_center,x_range, y_range, x_num_steps, y_num_steps)
 
-    # Initialize tracking variables that will be populated as the image is collected in
-    # a scanning configuration, e.g. with an APD as opposed to a camera
-    count_format = config["count_format"]
-    if collection_mode != CollectionMode.CAMERA:
-        img_array = np.empty((num_steps_1, num_steps_2))
-        # matplotlib will show nothing for NaN, instead of 0 or a random value
-        img_array[:] = np.nan
-        img_write_pos = []
-        if count_format == CountFormat.KCPS:
-            img_array_kcps = np.copy(img_array)
+    if xy_control_style == ControlStyle.STEP:
+        x_positions, y_positions, x_positions_1d, y_positions_1d, extent = ret_vals
+        pos_units = "um"
+
+        x_low = x_positions_1d[0]
+        x_high = x_positions_1d[x_num_steps - 1]
+        y_low = y_positions_1d[0]
+        y_high = y_positions_1d[y_num_steps - 1]
+
+        pixel_size = x_positions_1d[1] - x_positions_1d[0]
+
+        # %% Set up our raw data objects
+        # make an array to save information if the piezo did not reach it's target
+        flag_img_array = np.empty((x_num_steps, y_num_steps))
+        flag_img_write_pos = []
+        # array for dx values
+        dx_img_array = np.empty((x_num_steps, y_num_steps))
+        dx_img_write_pos = []
+        # array for dy values
+        dy_img_array = np.empty((x_num_steps, y_num_steps))
+        dy_img_write_pos = []
+
+    elif xy_control_style == ControlStyle.STREAM:
+        x_voltages, y_voltages, x_voltages_1d, y_voltages_1d, extent = ret_vals
+        x_positions_1d, y_positions_1d = x_voltages_1d, y_voltages_1d
+        pos_units = "V"
+        # xy_server.load_stream_xy(x_voltages, y_voltages)
+        if scan_type == "XY":
+            xy_server.load_stream_xy(x_voltages, y_voltages)
+        elif scan_type == "XZ":
+            z_voltages = y_voltages
+            y_vals_static = [y_center] * len(x_voltages)
+            xyz_server.load_stream_xyz(x_voltages, y_vals_static, z_voltages)
+        elif scan_type == "YZ":
+            z_voltages = y_voltages
+            x_vals_static = [x_center]*len(x_voltages)
+            xyz_server.load_stream_xyz( x_vals_static, x_voltages,z_voltages)
+
+    # Initialize imgArray and set all values to NaN so that unset values
+    # are not interpreted as 0 by matplotlib's colobar
+    img_array = np.empty((x_num_steps, y_num_steps))
+    img_array[:] = np.nan
+    img_array_kcps = np.copy(img_array)
+    img_write_pos = []
 
     ### Set up the image display
 
-    kpl.init_kplotlib(font_size=kpl.Size.SMALL)
-    if collection_mode == CollectionMode.CAMERA:
-        hor_label = "X"
-        ver_label = "Y"
-    else:
-        hor_label = xy_units
-        ver_label = xy_units if scan_axes == ScanAxes.XY else z_units
-    if count_format == CountFormat.RAW:
-        cbar_label = "Counts"
-    if count_format == CountFormat.KCPS:
-        cbar_label = "Kcps"
-    title = f"{scan_axes.name} image under {readout_laser}, {readout_us} us readout"
-    imshow_extent = None if collection_mode == CollectionMode.CAMERA else extent
-    imshow_kwargs = {
-        "title": title,
-        "x_label": hor_label,
-        "y_label": ver_label,
-        "cbar_label": cbar_label,
-        "extent": imshow_extent,
-    }
+    kpl.init_kplotlib(font_size=kpl.Size.SMALL, latex=False)
+
+    if um_scaled:
+        extent = [el * xy_scale for el in extent]
+        axes_labels = ["um", "um"]
+    elif xy_units is not None:
+        axes_labels = [xy_units, xy_units]
+
+    title = f"{scan_type} image under {readout_laser}, {readout_us} us readout"
 
     fig, ax = plt.subplots()
+    if scan_type == "XZ" or scan_type == "YZ" :
+        kpl.imshow(
+            ax,
+            img_array_kcps,
+            title=title,
+            x_label=axes_labels[0],
+            y_label=axes_labels[1],
+            cbar_label="kcps",
+            extent=extent,
+            vmin=vmin,
+            vmax=vmax,
+            aspect="auto",
+        )
+    else:
+        kpl.imshow(
+            ax,
+            img_array_kcps,
+            title=title,
+            x_label=axes_labels[0],
+            y_label=axes_labels[1],
+            cbar_label="kcps",
+            extent=extent,
+            vmin=vmin,
+            vmax=vmax,
+        )
 
     ### Collect the data
 
-    if collection_mode == CollectionMode.COUNTER:
-        # Show blank image to be filled
-        kpl.imshow(ax, img_array, **imshow_kwargs)
-        counter.start_tag_stream()
-    tb.init_safe_stop()
+    counter.start_tag_stream()
+    tool_belt.init_safe_stop()
 
-    if control_mode == PosControlMode.STEP:
-        for ind in range(total_num_samples):
-            if tb.safe_stop():
+    if xy_control_style == ControlStyle.STEP:
+
+        dx_list = []
+        dy_list = []
+        dz_list = []
+
+        for i in range(total_num_samples):
+
+            cur_x_pos = x_positions[i]
+            cur_y_pos = y_positions[i]
+
+            if tool_belt.safe_stop():
                 break
 
-            # Write
-            cur_coord_1 = coords_1_1d[ind]
-            cur_coord_2 = coords_2_1d[ind]
-            if scan_axes == ScanAxes.XY:
-                pos_server.write_xy(cur_coord_1, cur_coord_2)
-            elif scan_axes == ScanAxes.XZ:
-                pos_server.write_xyz(cur_coord_1, y_center, cur_coord_2)
-            elif scan_axes == ScanAxes.XZ:
-                pos_server.write_xyz(x_center, cur_coord_1, cur_coord_2)
+            if scan_type == "XY":
+                flag = xy_server.write_xy(cur_x_pos, cur_y_pos)
+            elif scan_type == 'XZ' or scan_type == 'YZ'  :
+                flag = xyz_server.write_xyz(cur_x_pos, y_center, cur_y_pos)
 
-            # Read
+            # Some diagnostic stuff - checking how far we are from the target pos
+            actual_x_pos, actual_y_pos, actual_z_pos = xyz_server.read_xyz()
+            dx_list.append((actual_x_pos - cur_x_pos) * 1e3)
+            if scan_type == "XY":
+                dy_list.append((actual_y_pos - cur_y_pos) * 1e3)
+            elif scan_type == "XZ" or scan_type == 'YZ' :
+                cur_z_pos = cur_y_pos
+                dy_list.append((actual_z_pos - cur_z_pos) * 1e3)
+            # read the counts at this location
+
             pulse_gen.stream_start(1)
-            new_samples = counter.read_counter_simple(1)
-            populate_img_array(new_samples, img_array, img_write_pos)
-            if count_format == CountFormat.RAW:
-                kpl.imshow_update(ax, img_array)
-            elif count_format == CountFormat.KCPS:
-                img_array_kcps[:] = (img_array[:] / 1000) / readout_sec
-                kpl.imshow_update(ax, img_array_kcps)
 
-    elif control_mode == PosControlMode.STREAM:
-        if collection_mode == CollectionMode.CAMERA:
-            camera.arm()
+            new_samples = counter.read_counter_simple(1)
+            # update the image arrays
+            populate_img_array(new_samples, img_array, img_write_pos)
+            populate_img_array([flag], flag_img_array, flag_img_write_pos)
+
+            populate_img_array(
+                [(actual_x_pos - cur_x_pos) * 1e3], dx_img_array, dx_img_write_pos
+            )
+            populate_img_array(
+                [(actual_y_pos - cur_y_pos) * 1e3], dy_img_array, dy_img_write_pos
+            )
+            # Either include this in loop so it plots data as it takes it (takes about 2x as long)
+            # or put it ourside loop so it plots after data is complete
+            img_array_kcps[:] = (img_array[:] / 1000) / readout_sec
+            kpl.imshow_update(ax, img_array_kcps, vmin, vmax)
+
+    elif xy_control_style == ControlStyle.STREAM:
 
         pulse_gen.stream_start(total_num_samples)
+        charge_init = nv_minus_init
 
-        if collection_mode == CollectionMode.CAMERA:
-            img_array = camera.read()
-            camera.disarm()
-            if count_format == CountFormat.RAW:
-                kpl.imshow(ax, img_array, **imshow_kwargs)
-            elif count_format == CountFormat.KCPS:
-                img_array_kcps = (np.copy(img_array) / 1000) / readout_sec
-                kpl.imshow(ax, img_array_kcps, **imshow_kwargs)
+        timeout_duration = ((period * (10**-9)) * total_num_samples) + 10
+        timeout_inst = time.time() + timeout_duration
+        num_read_so_far = 0
 
-        elif collection_mode == CollectionMode.COUNTER:
-            charge_init = nv_minus_init
+        while num_read_so_far < total_num_samples:
 
-            timeout_duration = ((period * (10**-9)) * total_num_samples) + 10
-            timeout_inst = time.time() + timeout_duration
-            num_read_so_far = 0
+            if (time.time() > timeout_inst) or tool_belt.safe_stop():
+                break
 
-            while num_read_so_far < total_num_samples:
-                if (time.time() > timeout_inst) or tb.safe_stop():
-                    break
+            # Read the samples
+            if charge_init:
+                new_samples = counter.read_counter_modulo_gates(2)
+            else:
+                new_samples = counter.read_counter_simple()
 
-                # Read the samples
+            # Update the image
+            num_new_samples = len(new_samples)
+            if num_new_samples > 0:
+                # If we did charge initialization, subtract out the non-initialized counts
                 if charge_init:
-                    new_samples = counter.read_counter_modulo_gates(2)
-                else:
-                    new_samples = counter.read_counter_simple()
+                    new_samples = [
+                        max(int(el[0]) - int(el[1]), 0) for el in new_samples
+                    ]
+                populate_img_array(new_samples, img_array, img_write_pos)
+                img_array_kcps[:] = (img_array[:] / 1000) / readout_sec
+                kpl.imshow_update(ax, img_array_kcps, vmin, vmax)
+                num_read_so_far += num_new_samples
 
-                # Update the image
-                num_new_samples = len(new_samples)
-                if num_new_samples > 0:
-                    # If we did charge initialization, subtract out the non-initialized counts
-                    if charge_init:
-                        new_samples = [
-                            max(int(el[0]) - int(el[1]), 0) for el in new_samples
-                        ]
-                    populate_img_array(new_samples, img_array, img_write_pos)
-                    if count_format == CountFormat.RAW:
-                        kpl.imshow_update(ax, img_array)
-                    elif count_format == CountFormat.KCPS:
-                        img_array_kcps[:] = (img_array[:] / 1000) / readout_sec
-                        kpl.imshow_update(ax, img_array_kcps)
-                    num_read_so_far += num_new_samples
-
-    if collection_mode == CollectionMode.COUNTER:
-        counter.clear_buffer()
+    counter.clear_buffer()
 
     ### Clean up and save the data
 
-    tb.reset_cfm(cxn)
-    pos.set_xyz(cxn, center_coords)
+    tool_belt.reset_cfm(cxn)
+    if scan_type == "XY":
+        xy_server.write_xy(x_center, y_center)
+    else:
+        xyz_server.write_xyz(x_center, y_center, z_center)
 
-    timestamp = tb.get_time_stamp()
+    timestamp = tool_belt.get_time_stamp()
     rawData = {
         "timestamp": timestamp,
         "nv_sig": nv_sig,
+        # 'nv_sig-units': tool_belt.get_nv_sig_units(),
         "x_center": x_center,
         "y_center": y_center,
-        "range_1": z_center,
-        "x_range": range_1,
-        "range_2": range_2,
+        "z_center": z_center,
+        "x_range": x_range,
+        "x_range-units": "um",
+        "y_range": y_range,
+        "y_range-units": "um",
         "num_steps": num_steps,
-        "extent": extent,
-        "scan_axes": scan_axes,
+        "scan_type": scan_type,
         "readout": readout,
         "readout-units": "ns",
         "title": title,
-        "coords_1_1d": coords_1_1d,
-        "coords_1_1d-units": axis_1_units,
-        "coords_2_1d": coords_1_1d,
-        "coords_2_1d-units": axis_2_units,
-        "img_array": img_array.astype(int),
+        "x_positions_1d": x_positions_1d.tolist(),
+        "x_positions_1d-units": pos_units,
+        "y_positions_1d": y_positions_1d.tolist(),
+        "y_positions_1d-units": pos_units,
+        "img_array": img_array.astype(int).tolist(),
         "img_array-units": "counts",
     }
 
-    filePath = tb.get_file_path(__file__, timestamp, nv_sig["name"])
-    tb.save_figure(fig, filePath)
-    tb.save_raw_data(rawData, filePath)
+    filePath = tool_belt.get_file_path(__file__, timestamp, nv_sig["name"])
+    tool_belt.save_figure(fig, filePath)
+    tool_belt.save_raw_data(rawData, filePath)
 
-    return img_array, coords_1_1d, coords_2_1d
+    return img_array, x_positions_1d, y_positions_1d
 
 
 if __name__ == "__main__":
-    file_name = "2023_09_11-13_52_01-johnson-nvref"
 
-    data = tb.get_raw_data(file_name)
+    file_name = "2024_04_15-16_35_14-sandia1-nvref"
+    data = tool_belt.get_raw_data(file_name)
     img_array = np.array(data["img_array"])
     readout = data["readout"]
-    img_array_kcps = (img_array / 1000) / (readout * 1e-9)
-    extent = data["extent"] if "extent" in data else None
+    img_array_kcps = (img_array / 150) / (readout * 1e-9)
+    
+    # do_presentation = True
+    # try:
+    #     scan_type = data['scan_type']
+    #     if scan_type == 'XY':
+    #         x_center = data["x_center"]
+    #         y_center = data["y_center"]
+    #         # x_range = data["x_range"]
+    #         # y_range = data["y_range"]
+    #         # x_num_steps = data["num_steps"]
+    #         # y_num_steps = data["num_steps"]
+
+    #     elif scan_type == 'XZ':
+    #         x_center = data["x_center"]
+    #         y_center = data["z_center"]
+    #     elif scan_type == 'YZ':
+    #         x_center = data["y_center"]
+    #         y_center = data["z_center"]
+    # except Exception:
+    #     nv_sig = data['nv_sig']
+    #     x_center = nv_sig['coords'][0]
+    #     y_center = nv_sig['coords'][1]
+
+    x_center = data["x_center"]
+    y_center = data["y_center"]
+    x_range = data["x_range"]
+    y_range = data["y_range"]
+    num_steps = data["num_steps"]
+    num_steps = data["num_steps"]
+    xlabel = "um"
+    ylabel = "um"
+
+    ret_vals = positioning.get_scan_grid_2d(
+        x_center, y_center, x_range, y_range, num_steps, num_steps
+    )
+    extent = ret_vals[-1]
 
     kpl.init_kplotlib()
     fig, ax = plt.subplots()
-    im = kpl.imshow(ax, img_array, cbar_label="ADUs")
-    ax.set_xticks(range(0, 501, 100))
-    # im = kpl.imshow(ax, img_array_kcps, extent=extent)
-    # ax.set_xlim([124.5 - 15, 124.5 + 15])
-    # ax.set_ylim([196.5 + 15, 196.5 - 15])
+    im = kpl.imshow(
+        ax,
+        img_array_kcps,
+        # title=title,
+        x_label=xlabel,
+        y_label=ylabel,
+        cbar_label="kcps",
+        vmax = 50,
+        extent=extent,
+        # aspect="auto",
+    )
 
-    # plot_coords = [
-    #     [183.66, 201.62],
-    #     [177.28, 233.34],
-    #     [237.42, 314.84],
-    #     [239.56, 262.84],
-    #     [315.58, 203.56],
-    # ]
-    # cal_coords = [
-    #     [139.5840657600651, 257.70994378810946],
-    #     [324.4796398557366, 218.27466265286117],
-    # ]
-    # for coords in plot_coords:
-    #     ax.plot(*coords, color="blue", marker="o", markersize=3)
-    # for coords in cal_coords:
-    #     ax.plot(*coords, color="green", marker="o", markersize=3)
-
-    plt.show(block=True)
+    # plt.show(block=True)
